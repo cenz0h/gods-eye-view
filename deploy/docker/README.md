@@ -31,11 +31,12 @@ Two keys are compiled into the browser bundle rather than read at request time, 
 - when `GOOGLE_MAPS_API_KEY` or `CESIUM_ION_TOKEN` changes
 - when `GEV_FORCE_REBUILD=1`
 
-Otherwise it reuses what is in the volume and starts in seconds. The build takes roughly 1-5 minutes
-depending on CPU; watch it with `docker logs -f gods-eye-view` and look for
-`[gev] building client bundle: ...` followed by `[gev] build complete in Ns`. The health check has a
-15 minute grace period to cover this, so a container that sits in `health: starting` on first run is
-normal.
+Otherwise it reuses what is in the volume and starts in seconds. Cesium is copied rather than
+bundled, so the build is quicker than its size suggests: measured at about 5 seconds on a 20-core
+desktop and 10 seconds on a GitHub runner. Allow a minute or two on a modest NAS CPU. Watch it with
+`docker logs -f gods-eye-view` and look for `[gev] building client bundle: ...` followed by
+`[gev] build complete in Ns`. The health check allows 15 minutes before reporting a problem, so a
+container sitting in `health: starting` during the first build is expected.
 
 | Volume | Purpose | Safe to delete? |
 | --- | --- | --- |

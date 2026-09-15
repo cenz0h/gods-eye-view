@@ -11,7 +11,7 @@
   <Project>https://github.com/bilawalsidhu/gods-eye-view</Project>
   <Overview>God's Eye View: a real-time intelligence console for planet Earth. Photorealistic 3D globe (Cesium + Google 3D Tiles), live aircraft, ships, satellites, earthquakes, fires, traffic and CCTV, with hands-free voice control.&#xD;
 &#xD;
-This image builds the web bundle on first start (1-5 minutes, watch the log) and then serves it. All API keys are optional; the globe works without any, but Google 3D Tiles need GOOGLE_MAPS_API_KEY and voice needs OPENAI_API_KEY plus HTTPS. Put it behind your reverse proxy (Nginx Proxy Manager / SWAG) for HTTPS. There is no built-in authentication: anyone who can reach the port can spend your API quota, so do not port-forward it. Unofficial packaging by cenz0h; upstream: bilawalsidhu/gods-eye-view. Non-commercial use only (bundled TeleGeography cable data is CC BY-NC-SA).</Overview>
+This image builds the web bundle on first start (usually well under a minute; watch the log) and then serves it. All API keys are optional; the globe works without any, but Google 3D Tiles need GOOGLE_MAPS_API_KEY and voice needs OPENAI_API_KEY plus HTTPS. Put it behind your reverse proxy (Nginx Proxy Manager / SWAG) for HTTPS. There is no built-in authentication: anyone who can reach the port can spend your API quota, so do not port-forward it. Unofficial packaging by cenz0h; upstream: bilawalsidhu/gods-eye-view. Non-commercial use only (bundled TeleGeography cable data is CC BY-NC-SA).</Overview>
   <Category>Tools: Other: Productivity:</Category>
   <WebUI>http://[IP]:[PORT:4173]/</WebUI>
   <TemplateURL>https://raw.githubusercontent.com/cenz0h/gods-eye-view/docker/deploy/unraid/gods-eye-view.xml</TemplateURL>
