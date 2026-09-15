@@ -117,6 +117,63 @@ Caddy: `reverse_proxy <ip>:4173 { flush_interval -1 }`. Traefik defaults are fin
 The app sends `X-Frame-Options: DENY` and `Content-Security-Policy: frame-ancestors 'none'`, so it
 cannot be embedded in a dashboard iframe such as Homepage or Organizr. Do not strip those headers.
 
+### Google billing
+
+**Read this before you set `GOOGLE_MAPS_API_KEY`.** Google Maps Platform is pay-as-you-go. The
+free allowance is granted per SKU per month, and three of the four SKUs this app can reach are
+requested by the **browser talking straight to Google**. Nothing in this container sits in that
+path, so no environment variable here can cap them.
+
+| What the app uses | Free per month | Then | Who calls Google | Cappable here? |
+| --- | --- | --- | --- | --- |
+| Photorealistic 3D Tiles | 1,000 | $6.00 / 1,000 | browser | no |
+| Geocoding (search, voice, HUD) | 10,000 | $5.00 / 1,000 | browser | no |
+| Places Nearby + Text Search | 5,000 each | $32.00 / 1,000 | this container | burst guard only |
+| Street View Static (CCTV fallback) | 10,000 | $7.00 / 1,000 | this container | no |
+
+Two things to understand about the shape of the spend:
+
+- **3D tiles are cheaper than they look.** Only the root tileset request bills; the thousands of
+  tiles the renderer streams while you fly around are free and unmetered. One root request covers
+  roughly three hours of rendering, and the app opens one per page load. About 30 page loads a day
+  stays inside the free tier.
+- **Idle time is not free.** The heads-up display refreshes every 15 seconds, and each refresh can
+  reverse-geocode the view centre and, below 25 km, ask Places what is nearby. Results are cached
+  in the page for positions within about 11 metres, so a stationary view settles down, but a moving
+  camera or a left-open dashboard keeps billing. Places is the expensive one at $32 per 1,000 with
+  only 5,000 free, so sustained low-altitude browsing is what actually costs money.
+
+#### Set daily quotas, because they are the only hard stop
+
+Budget alerts only email you; they do not stop requests. Per-API daily quotas do. In the
+[Google Cloud console](https://console.cloud.google.com/google/maps-apis/quotas), pick your
+project, then for each API below open **Quotas**, filter for the per-day limit, and set it. Over
+quota, Google refuses the request instead of billing it, and the app degrades: the globe falls
+back to Esri imagery, search stops resolving, the traffic and CCTV layers show their error state.
+
+| API | Suggested requests/day | Why |
+| --- | --- | --- |
+| Map Tiles API | 30 | 1,000/month free ÷ 31 |
+| Geocoding API | 300 | 10,000/month free ÷ 31 |
+| Places API (New) | 150 | 5,000/month free ÷ 31 |
+| Street View Static API | 300 | 10,000/month free ÷ 31 |
+
+Also restrict the key itself (APIs & Services, Credentials): an HTTP referrer restriction limited
+to your own hostname, and an API restriction listing only the four APIs above. The key ships inside
+the JavaScript bundle and is visible in devtools by design, so the referrer restriction is what
+stops someone else spending it.
+
+#### The zero-cost configuration
+
+If you would rather not enable Google billing at all, leave `GOOGLE_MAPS_API_KEY` empty and set
+only `CESIUM_ION_TOKEN`. The app then loads the same Google Photorealistic 3D tiles through Cesium
+ion instead, which is free within an eligible ion Community account, and no Google SKU is touched.
+You lose place search, the HUD's place context, and voice commands that resolve a named location.
+With neither key the globe still works on keyless Esri World Imagery.
+
+`GEV_RATELIMIT_GOOGLE_PER_MIN` (default 10 here) guards only the two server-side Places routes. It
+is a burst guard against a runaway loop, not a budget: a per-minute ceiling cannot bound a day.
+
 ### Security
 
 **There is no authentication on `/api/*`.** Anyone who can reach the port can drive the proxies and

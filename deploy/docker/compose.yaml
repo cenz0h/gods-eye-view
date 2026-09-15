@@ -20,10 +20,13 @@ services:
       PUID: "99"                 # Unraid nobody:users. Use 1000:1000 elsewhere.
       PGID: "100"
       PORT: "4173"               # container port; HOST is fixed to 0.0.0.0 by the image
-      # Per-IP throttles for the cost-bearing proxies. Behind a reverse proxy every browser shares
-      # the proxy's IP, so these act as GLOBAL caps. Unset = unlimited.
+      # Per-IP burst guards for the cost-bearing proxies. Behind a reverse proxy every browser
+      # shares the proxy's IP, so these act as GLOBAL caps. Unset = unlimited.
+      # These are NOT billing caps and cannot bound a day's spend. Google Places bills $32 per
+      # 1000 with only 5000 free per month, so ALSO set daily quotas in the Google Cloud console:
+      # see "Google billing" in README.md. 10/min covers normal use (the HUD polls every 15s).
       GEV_RATELIMIT_OPENAI_PER_MIN: "30"
-      GEV_RATELIMIT_GOOGLE_PER_MIN: "60"
+      GEV_RATELIMIT_GOOGLE_PER_MIN: "10"
       # GEV_FORCE_REBUILD: "1"   # rebuild dist on every start (debugging)
       # GEV_BUILD_NODE_OPTIONS: "--max-old-space-size=3072"
     ports:
