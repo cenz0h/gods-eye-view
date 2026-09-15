@@ -1,0 +1,208 @@
+name: Sync upstream
+
+# Lives on the `docker` branch (the fork's default branch). Never add this file to `main`.
+# 1) fast-forward fork main to upstream main   2) merge main into docker (merge, never rebase)
+# 3) on conflict/divergence/overlay drift: no push, open or update one issue, fail
+# 4) on a successful merge: dispatch docker-image.yml (workflow_dispatch is exempt from the
+#    "GITHUB_TOKEN events don't start workflows" rule, so no PAT is needed).
+
+on:
+  schedule:
+    - cron: '17 3 * * *' # daily 03:17 UTC (13:17 AEST)
+  workflow_dispatch:
+    inputs:
+      trigger_build:
+        description: Dispatch the Docker image build after a successful sync
+        type: boolean
+        default: true
+
+permissions:
+  contents: write
+  issues: write
+  actions: write
+
+concurrency:
+  group: sync-upstream
+  cancel-in-progress: false
+
+env:
+  UPSTREAM_REPO: bilawalsidhu/gods-eye-view
+  UPSTREAM_BRANCH: main
+  MIRROR_BRANCH: main
+  WORK_BRANCH: docker
+  ISSUE_LABEL: upstream-sync
+  GH_TOKEN: ${{ github.token }}
+
+jobs:
+  sync:
+    name: Mirror main, merge into docker
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Check out docker branch
+        uses: actions/checkout@v4
+        with:
+          ref: docker
+          fetch-depth: 0
+          persist-credentials: true
+
+      - name: Configure git identity
+        run: |
+          git config user.name  'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+
+      - name: Fetch upstream and fork refs
+        id: upstream
+        run: |
+          set -euo pipefail
+          git remote add upstream "https://github.com/${UPSTREAM_REPO}.git"
+          git fetch --no-tags upstream "${UPSTREAM_BRANCH}"
+          git fetch --no-tags origin "${MIRROR_BRANCH}" "${WORK_BRANCH}"
+          echo "sha=$(git rev-parse "upstream/${UPSTREAM_BRANCH}")" >> "$GITHUB_OUTPUT"
+          echo "short=$(git rev-parse --short "upstream/${UPSTREAM_BRANCH}")" >> "$GITHUB_OUTPUT"
+
+      - name: Fast-forward mirror branch (main)
+        id: mirror
+        run: |
+          set -euo pipefail
+          UP="upstream/${UPSTREAM_BRANCH}"; MIR="origin/${MIRROR_BRANCH}"
+          if git merge-base --is-ancestor "$UP" "$MIR"; then
+            echo "main already at/after upstream $(git rev-parse --short "$UP")"
+            echo "status=current" >> "$GITHUB_OUTPUT"
+          elif git merge-base --is-ancestor "$MIR" "$UP"; then
+            git push origin "${UP}:refs/heads/${MIRROR_BRANCH}"
+            echo "status=updated" >> "$GITHUB_OUTPUT"
+          else
+            echo "::error::fork ${MIRROR_BRANCH} has commits that are not in upstream; refusing to touch it"
+            echo "status=diverged" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Merge upstream into docker
+        id: merge
+        if: steps.mirror.outputs.status != 'diverged'
+        run: |
+          set -euo pipefail
+          UP="upstream/${UPSTREAM_BRANCH}"
+          if git merge-base --is-ancestor "$UP" HEAD; then
+            echo "docker already contains upstream $(git rev-parse --short "$UP")"
+            echo "status=nochange" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          if git merge --no-ff --no-edit \
+               -m "chore(sync): merge upstream ${UPSTREAM_BRANCH} @ $(git rev-parse --short "$UP") into ${WORK_BRANCH}" \
+               "$UP"; then
+            echo "status=merged" >> "$GITHUB_OUTPUT"
+          else
+            { echo 'conflicts<<GEVEOF'; git diff --name-only --diff-filter=U; echo 'GEVEOF'; } >> "$GITHUB_OUTPUT"
+            git merge --abort
+            echo "::error::merge conflict; see the upstream-sync issue"
+            echo "status=conflict" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Guard - docker may only add deploy/** and its two workflows
+        id: drift
+        if: steps.merge.outputs.status == 'merged'
+        run: |
+          set -euo pipefail
+          UP="upstream/${UPSTREAM_BRANCH}"
+          bad="$(git diff --name-only "$UP" HEAD \
+                 | grep -Ev '^(deploy/|\.github/workflows/(sync-upstream|docker-image)\.yml$)' || true)"
+          if [ -n "$bad" ]; then
+            { echo 'files<<GEVEOF'; echo "$bad"; echo 'GEVEOF'; } >> "$GITHUB_OUTPUT"
+            echo "::error::docker branch modifies upstream-owned files; not pushing"
+            echo "status=drift" >> "$GITHUB_OUTPUT"
+          else
+            echo "status=ok" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Push docker
+        if: steps.merge.outputs.status == 'merged' && steps.drift.outputs.status == 'ok'
+        run: git push origin "HEAD:refs/heads/${WORK_BRANCH}"
+
+      - name: Close a previously opened sync issue
+        if: >
+          steps.mirror.outputs.status != 'diverged' &&
+          steps.merge.outputs.status != 'conflict' &&
+          steps.drift.outputs.status != 'drift'
+        run: |
+          set -euo pipefail
+          n="$(gh issue list -R "$GITHUB_REPOSITORY" --label "$ISSUE_LABEL" --state open --json number --jq '.[0].number // empty')"
+          if [ -n "$n" ]; then
+            gh issue close "$n" -R "$GITHUB_REPOSITORY" \
+              -c "Resolved: sync succeeded at upstream ${{ steps.upstream.outputs.short }} (${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }})."
+          fi
+
+      - name: Dispatch image build
+        if: >
+          steps.merge.outputs.status == 'merged' && steps.drift.outputs.status == 'ok' &&
+          (github.event_name == 'schedule' || inputs.trigger_build)
+        run: |
+          gh workflow run docker-image.yml -R "$GITHUB_REPOSITORY" --ref "$WORK_BRANCH" \
+            -f reason="upstream sync ${{ steps.upstream.outputs.short }}"
+
+      - name: Open or update the sync issue and fail
+        if: >
+          steps.mirror.outputs.status == 'diverged' ||
+          steps.merge.outputs.status == 'conflict' ||
+          steps.drift.outputs.status == 'drift'
+        env:
+          MIRROR_STATUS: ${{ steps.mirror.outputs.status }}
+          MERGE_STATUS: ${{ steps.merge.outputs.status }}
+          DRIFT_STATUS: ${{ steps.drift.outputs.status }}
+          CONFLICTS: ${{ steps.merge.outputs.conflicts }}
+          DRIFT_FILES: ${{ steps.drift.outputs.files }}
+          UP_SHORT: ${{ steps.upstream.outputs.short }}
+          UP_SHA: ${{ steps.upstream.outputs.sha }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          set -euo pipefail
+          body="$RUNNER_TEMP/issue.md"
+          {
+            echo "Automated upstream sync **failed** on $(date -u +%Y-%m-%dT%H:%MZ). Nothing was pushed."
+            echo
+            echo "- Upstream: https://github.com/${UPSTREAM_REPO}/commit/${UP_SHA} (\`${UP_SHORT}\`)"
+            echo "- Run: ${RUN_URL}"
+            echo
+            if [ "$MIRROR_STATUS" = "diverged" ]; then
+              echo "## Fork \`main\` has diverged from upstream"
+              echo
+              echo "\`main\` must stay a pure mirror. Inspect with \`git log upstream/main..origin/main\`, move any wanted commit to \`docker\`, then reset the mirror:"
+              echo
+              echo '```bash'
+              echo 'git fetch upstream && git fetch origin'
+              echo 'git push --force-with-lease=main origin upstream/main:main'
+              echo '```'
+            elif [ "$MERGE_STATUS" = "conflict" ]; then
+              echo "## Merge conflict merging upstream into \`docker\`"
+              echo
+              echo "Conflicting files:"; echo; echo '```'; echo "$CONFLICTS"; echo '```'; echo
+              echo "Resolve locally (Git Bash):"
+              echo
+              echo '```bash'
+              echo 'deploy/scripts/sync-upstream.sh            # stops at the conflict, leaves the merge open'
+              echo '# for any conflicting file OUTSIDE deploy/, take upstream verbatim:'
+              echo '#   git checkout --theirs -- <path> && git add <path>'
+              echo '# for deploy/** decide by hand, then:'
+              echo 'git commit --no-edit && git push origin docker   # a user push also triggers the image build'
+              echo '```'
+              echo
+              echo "If upstream added its own root-level Docker files this is expected; ours stay under \`deploy/\`."
+            else
+              echo "## Overlay drift: \`docker\` modifies upstream-owned files"
+              echo
+              echo "Only \`deploy/**\`, \`.github/workflows/sync-upstream.yml\` and \`.github/workflows/docker-image.yml\` may differ from upstream. Offending paths:"
+              echo; echo '```'; echo "$DRIFT_FILES"; echo '```'; echo
+              echo "Fix on \`docker\`: \`git checkout upstream/main -- <path>\` (restores upstream's version), commit, push."
+            fi
+            echo
+            echo "_This issue is updated by each failing run and auto-closed by the next successful one._"
+          } > "$body"
+          title="Upstream sync failed: ${MERGE_STATUS:-$MIRROR_STATUS}${DRIFT_STATUS:+/$DRIFT_STATUS} at upstream ${UP_SHORT}"
+          n="$(gh issue list -R "$GITHUB_REPOSITORY" --label "$ISSUE_LABEL" --state open --json number --jq '.[0].number // empty')"
+          if [ -n "$n" ]; then
+            gh issue edit "$n" -R "$GITHUB_REPOSITORY" --title "$title" --body-file "$body"
+            gh issue comment "$n" -R "$GITHUB_REPOSITORY" --body "Still failing as of $(date -u +%Y-%m-%dT%H:%MZ): ${RUN_URL}"
+          else
+            gh issue create -R "$GITHUB_REPOSITORY" --title "$title" --label "$ISSUE_LABEL" --body-file "$body"
+          fi
+          exit 1

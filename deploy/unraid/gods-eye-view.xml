@@ -1,0 +1,53 @@
+<?xml version="1.0"?>
+<Container version="2">
+  <Name>gods-eye-view</Name>
+  <Repository>ghcr.io/cenz0h/gods-eye-view:latest</Repository>
+  <Registry>https://github.com/cenz0h/gods-eye-view/pkgs/container/gods-eye-view</Registry>
+  <Network>bridge</Network>
+  <MyIP/>
+  <Shell>sh</Shell>
+  <Privileged>false</Privileged>
+  <Support>https://github.com/cenz0h/gods-eye-view/issues</Support>
+  <Project>https://github.com/bilawalsidhu/gods-eye-view</Project>
+  <Overview>God's Eye View: a real-time intelligence console for planet Earth. Photorealistic 3D globe (Cesium + Google 3D Tiles), live aircraft, ships, satellites, earthquakes, fires, traffic and CCTV, with hands-free voice control.&#xD;
+&#xD;
+This image builds the web bundle on first start (1-5 minutes, watch the log) and then serves it. All API keys are optional; the globe works without any, but Google 3D Tiles need GOOGLE_MAPS_API_KEY and voice needs OPENAI_API_KEY plus HTTPS. Put it behind your reverse proxy (Nginx Proxy Manager / SWAG) for HTTPS. There is no built-in authentication: anyone who can reach the port can spend your API quota, so do not port-forward it. Unofficial packaging by cenz0h; upstream: bilawalsidhu/gods-eye-view. Non-commercial use only (bundled TeleGeography cable data is CC BY-NC-SA).</Overview>
+  <Category>Tools: Other: Productivity:</Category>
+  <WebUI>http://[IP]:[PORT:4173]/</WebUI>
+  <TemplateURL>https://raw.githubusercontent.com/cenz0h/gods-eye-view/docker/deploy/unraid/gods-eye-view.xml</TemplateURL>
+  <Icon>https://raw.githubusercontent.com/cenz0h/gods-eye-view/docker/public/logo.svg</Icon>
+  <ExtraParams>--init --memory=3g --security-opt no-new-privileges=true</ExtraParams>
+  <PostArgs/>
+  <CPUset/>
+  <DateInstalled/>
+  <DonateText/>
+  <DonateLink/>
+  <Requires/>
+
+  <Config Name="WebUI Port" Target="4173" Default="4173" Mode="tcp" Description="HTTP port. Point your HTTPS reverse proxy at this." Type="Port" Display="always" Required="true" Mask="false">4173</Config>
+
+  <Config Name="Provider cache" Target="/app/.gev-cache" Default="/mnt/user/appdata/gods-eye-view/cache" Mode="rw" Description="Provider caches (terrain heights, satellite TLEs, TomTom daily budget counter). Keep this to avoid re-fetching expensive data." Type="Path" Display="always" Required="true" Mask="false">/mnt/user/appdata/gods-eye-view/cache</Config>
+  <Config Name="Logs" Target="/app/.gev-logs" Default="/mnt/user/appdata/gods-eye-view/logs" Mode="rw" Description="Voice conversation debug log (only written when voice is used)." Type="Path" Display="advanced" Required="true" Mask="false">/mnt/user/appdata/gods-eye-view/logs</Config>
+  <Config Name="Built web bundle" Target="/app/dist" Default="/mnt/user/appdata/gods-eye-view/dist" Mode="rw" Description="Built client bundle (~100 MB). Safe to delete; it is rebuilt on the next start." Type="Path" Display="advanced" Required="true" Mask="false">/mnt/user/appdata/gods-eye-view/dist</Config>
+
+  <Config Name="PUID" Target="PUID" Default="99" Mode="" Description="User id the app runs as (99 = nobody)." Type="Variable" Display="advanced" Required="false" Mask="false">99</Config>
+  <Config Name="PGID" Target="PGID" Default="100" Mode="" Description="Group id the app runs as (100 = users)." Type="Variable" Display="advanced" Required="false" Mask="false">100</Config>
+  <Config Name="TZ" Target="TZ" Default="Australia/Sydney" Mode="" Description="Timezone for log timestamps." Type="Variable" Display="advanced" Required="false" Mask="false">Australia/Sydney</Config>
+
+  <Config Name="GOOGLE_MAPS_API_KEY" Target="GOOGLE_MAPS_API_KEY" Default="" Mode="" Description="Google Photorealistic 3D Tiles. Browser-visible: restrict it by HTTP referrer. Changing it rebuilds the bundle on the next start." Type="Variable" Display="always" Required="false" Mask="true"/>
+  <Config Name="CESIUM_ION_TOKEN" Target="CESIUM_ION_TOKEN" Default="" Mode="" Description="Cesium ion imagery/terrain. Browser-visible: use a public assets:read token. Changing it rebuilds the bundle on the next start." Type="Variable" Display="always" Required="false" Mask="true"/>
+  <Config Name="GOOGLE_MAPS_SERVER_API_KEY" Target="GOOGLE_MAPS_SERVER_API_KEY" Default="" Mode="" Description="Server-only Google key for Places (falls back to GOOGLE_MAPS_API_KEY)." Type="Variable" Display="advanced" Required="false" Mask="true"/>
+  <Config Name="OPENAI_API_KEY" Target="OPENAI_API_KEY" Default="" Mode="" Description="Voice control and HUD summaries. Voice also needs HTTPS via your reverse proxy." Type="Variable" Display="always" Required="false" Mask="true"/>
+  <Config Name="OPENSKY_AUTH_MODE" Target="OPENSKY_AUTH_MODE" Default="" Mode="" Description="anon | basic | oauth | auto" Type="Variable" Display="always" Required="false" Mask="false"/>
+  <Config Name="OPENSKY_CLIENT_ID" Target="OPENSKY_CLIENT_ID" Default="" Mode="" Description="OpenSky OAuth client id." Type="Variable" Display="always" Required="false" Mask="true"/>
+  <Config Name="OPENSKY_CLIENT_SECRET" Target="OPENSKY_CLIENT_SECRET" Default="" Mode="" Description="OpenSky OAuth client secret." Type="Variable" Display="always" Required="false" Mask="true"/>
+  <Config Name="OPENSKY_USERNAME" Target="OPENSKY_USERNAME" Default="" Mode="" Description="OpenSky basic-auth username (legacy)." Type="Variable" Display="advanced" Required="false" Mask="false"/>
+  <Config Name="OPENSKY_PASSWORD" Target="OPENSKY_PASSWORD" Default="" Mode="" Description="OpenSky basic-auth password (legacy)." Type="Variable" Display="advanced" Required="false" Mask="true"/>
+  <Config Name="AISSTREAM_API_KEY" Target="AISSTREAM_API_KEY" Default="" Mode="" Description="Live vessels via aisstream.io." Type="Variable" Display="always" Required="false" Mask="true"/>
+  <Config Name="TOMTOM_API_KEY" Target="TOMTOM_API_KEY" Default="" Mode="" Description="Live traffic tiles." Type="Variable" Display="always" Required="false" Mask="true"/>
+  <Config Name="FIRMS_MAP_KEY" Target="FIRMS_MAP_KEY" Default="" Mode="" Description="NASA FIRMS active fires." Type="Variable" Display="always" Required="false" Mask="true"/>
+  <Config Name="LL2_API_TOKEN" Target="LL2_API_TOKEN" Default="" Mode="" Description="Launch Library 2 token (optional; raises the rate limit)." Type="Variable" Display="advanced" Required="false" Mask="true"/>
+  <Config Name="GEV_RATELIMIT_OPENAI_PER_MIN" Target="GEV_RATELIMIT_OPENAI_PER_MIN" Default="30" Mode="" Description="Max OpenAI proxy requests per minute per client IP. Behind a reverse proxy this is a global cap. 0 or unset = unlimited." Type="Variable" Display="always" Required="false" Mask="false">30</Config>
+  <Config Name="GEV_RATELIMIT_GOOGLE_PER_MIN" Target="GEV_RATELIMIT_GOOGLE_PER_MIN" Default="60" Mode="" Description="Max Google proxy requests per minute per client IP. 0 or unset = unlimited." Type="Variable" Display="always" Required="false" Mask="false">60</Config>
+  <Config Name="GEV_FORCE_REBUILD" Target="GEV_FORCE_REBUILD" Default="0" Mode="" Description="Set to 1 to rebuild the web bundle on every start (debugging)." Type="Variable" Display="advanced" Required="false" Mask="false">0</Config>
+</Container>

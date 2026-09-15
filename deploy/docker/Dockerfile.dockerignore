@@ -1,0 +1,29 @@
+# Build-context filter for deploy/docker/Dockerfile. BuildKit reads this file because the
+# Dockerfile is passed with -f; it takes precedence over any root .dockerignore (which we
+# deliberately do not create, to avoid an add/add conflict with upstream's future one).
+.git
+.github
+node_modules
+dist
+docs/media
+.env
+.env.*
+!.env.example
+*.log
+screenshots
+qa-shots
+output
+.gev-logs
+.gev-cache
+.gstack
+3d-models
+pinokio/ENVIRONMENT
+pinokio/.installed
+deploy/docker/compose.yaml
+deploy/docker/gev.env
+deploy/docker/gev.env.example
+deploy/docker/README.md
+deploy/unraid
+deploy/scripts
+PLAN.md
+.smoke

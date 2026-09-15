@@ -1,0 +1,308 @@
+name: Docker image
+
+# Lives on the `docker` branch. Builds ghcr.io/cenz0h/gods-eye-view from deploy/docker/Dockerfile,
+# smoke-tests each architecture BEFORE anything is pushed, then publishes a multi-arch manifest.
+# Runs on: user pushes to docker (bot pushes never fire `push`), and workflow_dispatch from
+# sync-upstream.yml or the CLI.
+
+on:
+  push:
+    branches: [docker]
+  workflow_dispatch:
+    inputs:
+      reason:
+        description: Why this build was requested (shown in the summary)
+        type: string
+        default: manual
+      push:
+        description: Push to GHCR after a green smoke test (untick for a dry run)
+        type: boolean
+        default: true
+
+permissions:
+  contents: read
+  packages: write
+  issues: write
+
+concurrency:
+  group: docker-image-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAME: ${{ github.repository }}
+  SMOKE_PORT: '4173'
+  SMOKE_TIMEOUT_SECONDS: '600'
+  GH_TOKEN: ${{ github.token }}
+
+jobs:
+  prepare:
+    name: Resolve versions
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      upstream_sha: ${{ steps.v.outputs.upstream_sha }}
+      upstream_short: ${{ steps.v.outputs.upstream_short }}
+      version: ${{ steps.v.outputs.version }}
+      should_push: ${{ steps.v.outputs.should_push }}
+      build_date: ${{ steps.v.outputs.build_date }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - id: v
+        run: |
+          set -euo pipefail
+          git fetch --no-tags origin main
+          base="$(git merge-base HEAD origin/main)"
+          echo "upstream_sha=$base" >> "$GITHUB_OUTPUT"
+          echo "upstream_short=$(git rev-parse --short "$base")" >> "$GITHUB_OUTPUT"
+          echo "version=$(node -p "require('./package.json').version")" >> "$GITHUB_OUTPUT"
+          echo "build_date=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$GITHUB_OUTPUT"
+          if [ "${{ github.event_name }}" = "push" ] || [ "${{ inputs.push }}" = "true" ]; then
+            echo "should_push=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "should_push=false" >> "$GITHUB_OUTPUT"
+          fi
+          echo "reason: ${{ inputs.reason || 'push to docker' }}" >> "$GITHUB_STEP_SUMMARY"
+
+  build:
+    name: Build + smoke (${{ matrix.platform }})
+    needs: prepare
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: linux/amd64
+            runner: ubuntu-24.04
+          - platform: linux/arm64
+            runner: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Platform slug
+        id: slug
+        env:
+          PLATFORM: ${{ matrix.platform }}
+        run: echo "slug=${PLATFORM//\//-}" >> "$GITHUB_OUTPUT"
+
+      - name: OCI labels
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Build for smoke test (local only)
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: deploy/docker/Dockerfile
+          platforms: ${{ matrix.platform }}
+          load: true
+          push: false
+          provenance: false
+          tags: gev-smoke:${{ steps.slug.outputs.slug }}
+          labels: ${{ steps.meta.outputs.labels }}
+          build-args: |
+            GEV_BUILD_ID=${{ github.sha }}
+            GEV_SOURCE_REV=${{ github.sha }}
+            GEV_UPSTREAM_SHA=${{ needs.prepare.outputs.upstream_sha }}
+            GEV_BUILD_DATE=${{ needs.prepare.outputs.build_date }}
+            GEV_VERSION=${{ needs.prepare.outputs.version }}+upstream.${{ needs.prepare.outputs.upstream_short }}
+          cache-from: type=gha,scope=${{ steps.slug.outputs.slug }}
+          cache-to: type=gha,mode=max,scope=${{ steps.slug.outputs.slug }}
+
+      - name: Smoke test (boots the container keyless; validates vite build, server and API routing)
+        env:
+          IMG: gev-smoke:${{ steps.slug.outputs.slug }}
+        run: |
+          set -euo pipefail
+          P="$SMOKE_PORT"; BASE="http://127.0.0.1:$P"
+          docker run -d --name gev-smoke -p "$P:4173" --memory 6g --memory-swap 6g "$IMG"
+          cleanup() {
+            echo "::group::container logs (tail)"; docker logs gev-smoke 2>&1 | tail -n 200; echo "::endgroup::"
+            docker rm -f gev-smoke >/dev/null 2>&1 || true
+          }
+          trap cleanup EXIT
+
+          deadline=$((SECONDS + SMOKE_TIMEOUT_SECONDS))
+          until curl -fsS -o /dev/null "$BASE/api/tomtom/status"; do
+            if [ "$(docker inspect -f '{{.State.Running}}' gev-smoke)" != "true" ]; then
+              echo "::error::container exited before becoming healthy (vite build or entrypoint failed)"; exit 1
+            fi
+            if [ "$SECONDS" -ge "$deadline" ]; then
+              echo "::error::server not reachable after ${SMOKE_TIMEOUT_SECONDS}s"; exit 1
+            fi
+            sleep 5
+          done
+          echo "server up after ~${SECONDS}s (includes the in-container vite build)"
+          echo "boot time (${{ matrix.platform }}): ~${SECONDS}s" >> "$GITHUB_STEP_SUMMARY"
+
+          check() { # name url want_status ctype_regex body_regex [extra curl args...]
+            local name="$1" url="$2" want="$3" ctype="$4" body="$5"; shift 5
+            local hdr out code; hdr="$(mktemp)"; out="$(mktemp)"
+            code="$(curl -sS -o "$out" -D "$hdr" -w '%{http_code}' "$@" "$url")"
+            if [ "$code" != "$want" ]; then
+              echo "::error::$name: expected HTTP $want, got $code"; head -c 400 "$out"; echo; return 1
+            fi
+            if [ -n "$ctype" ] && ! grep -qiE "^content-type: *$ctype" "$hdr"; then
+              echo "::error::$name: unexpected content-type"; grep -i '^content-type' "$hdr" || true; return 1
+            fi
+            if [ -n "$body" ] && ! grep -qiE "$body" "$out"; then
+              echo "::error::$name: body did not match /$body/"; head -c 400 "$out"; echo; return 1
+            fi
+            echo "ok   $name -> $code"
+          }
+          check "GET / (HTML shell)"                 "$BASE/"                   200 'text/html'        '<html'
+          check "GET / with proxied Host header"     "$BASE/"                   200 'text/html'        '<html' -H 'Host: gev.example.com'
+          check "GET /api/tomtom/status (JSON)"      "$BASE/api/tomtom/status"  200 'application/json' '"hasKey": *false'
+          check "GET /api/does-not-exist (JSON 404)" "$BASE/api/does-not-exist" 404 'application/json' 'Unknown API route'
+          check "GET /api/setup/status absent"       "$BASE/api/setup/status"   404 'application/json' ''
+
+      - name: Log in to GHCR
+        if: needs.prepare.outputs.should_push == 'true'
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Push by digest (cache hit from the smoke build; no rebuild)
+        if: needs.prepare.outputs.should_push == 'true'
+        id: push
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: deploy/docker/Dockerfile
+          platforms: ${{ matrix.platform }}
+          provenance: false
+          labels: ${{ steps.meta.outputs.labels }}
+          build-args: |
+            GEV_BUILD_ID=${{ github.sha }}
+            GEV_SOURCE_REV=${{ github.sha }}
+            GEV_UPSTREAM_SHA=${{ needs.prepare.outputs.upstream_sha }}
+            GEV_BUILD_DATE=${{ needs.prepare.outputs.build_date }}
+            GEV_VERSION=${{ needs.prepare.outputs.version }}+upstream.${{ needs.prepare.outputs.upstream_short }}
+          cache-from: type=gha,scope=${{ steps.slug.outputs.slug }}
+          outputs: type=image,name=${{ env.REGISTRY }}/${{ env.IMAGE_NAME }},push-by-digest=true,name-canonical=true,push=true
+
+      - name: Export digest
+        if: needs.prepare.outputs.should_push == 'true'
+        run: |
+          mkdir -p "$RUNNER_TEMP/digests"
+          d="${{ steps.push.outputs.digest }}"
+          touch "$RUNNER_TEMP/digests/${d#sha256:}"
+
+      - uses: actions/upload-artifact@v4
+        if: needs.prepare.outputs.should_push == 'true'
+        with:
+          name: digests-${{ steps.slug.outputs.slug }}
+          path: ${{ runner.temp }}/digests/*
+          if-no-files-found: error
+          retention-days: 1
+
+  merge:
+    name: Publish manifest + tags
+    needs: [prepare, build]
+    if: needs.prepare.outputs.should_push == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: ${{ runner.temp }}/digests
+          pattern: digests-*
+          merge-multiple: true
+
+      - uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Tags
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          tags: |
+            type=raw,value=latest,enable=${{ github.ref == 'refs/heads/docker' }}
+            type=sha,prefix=sha-,format=short
+            type=raw,value=upstream-${{ needs.prepare.outputs.upstream_short }}
+            type=raw,value={{date 'YYYY-MM-DD'}}
+
+      - name: Create multi-arch manifest
+        working-directory: ${{ runner.temp }}/digests
+        run: |
+          set -euo pipefail
+          docker buildx imagetools create \
+            $(jq -cr '.tags | map("-t " + .) | join(" ")' <<< "$DOCKER_METADATA_OUTPUT_JSON") \
+            $(printf "$REGISTRY/$IMAGE_NAME@sha256:%s " *)
+
+      - name: Inspect and summarise
+        run: |
+          docker buildx imagetools inspect "$REGISTRY/$IMAGE_NAME:${{ steps.meta.outputs.version }}"
+          {
+            echo "### Published"
+            echo '```'
+            echo "${{ steps.meta.outputs.tags }}"
+            echo '```'
+            echo "docker sha: \`${{ github.sha }}\`  upstream: \`${{ needs.prepare.outputs.upstream_sha }}\`"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  notify-failure:
+    name: Open issue on failure
+    needs: [prepare, build, merge]
+    if: failure()
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - run: |
+          set -euo pipefail
+          label=image-build-failed
+          url="${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+          title="Docker image build failed at docker ${GITHUB_SHA:0:7} (upstream ${{ needs.prepare.outputs.upstream_short }})"
+          body="$RUNNER_TEMP/fail.md"
+          {
+            echo "The image build or smoke test failed: ${url}"
+            echo
+            echo "Likely causes, in order:"
+            echo
+            echo "1. Upstream changed a \`package.json\` script, the build output dir, or port handling that the Dockerfile or entrypoint relies on."
+            echo "2. Upstream's own \`vite build\` fails at this commit."
+            echo "3. The Node engine range moved (see \`engines\` in package.json) past the image's base tag."
+            echo "4. Runner or registry outage."
+            echo
+            echo "Nothing was published, so \`:latest\` still points at the last good image. Roll back or pin with \`ghcr.io/cenz0h/gods-eye-view:upstream-<sha>\` or \`:sha-<sha>\`."
+            echo
+            echo "_Auto-closed by the next successful build._"
+          } > "$body"
+          n="$(gh issue list -R "$GITHUB_REPOSITORY" --label "$label" --state open --json number --jq '.[0].number // empty')"
+          if [ -n "$n" ]; then
+            gh issue comment "$n" -R "$GITHUB_REPOSITORY" --body "Failed again: ${url}"
+          else
+            gh issue create -R "$GITHUB_REPOSITORY" --title "$title" --label "$label" --body-file "$body"
+          fi
+
+  close-failure-issue:
+    name: Close failure issue
+    needs: merge
+    if: success()
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - run: |
+          n="$(gh issue list -R "$GITHUB_REPOSITORY" --label image-build-failed --state open --json number --jq '.[0].number // empty')"
+          if [ -n "$n" ]; then
+            gh issue close "$n" -R "$GITHUB_REPOSITORY" -c "Build green again: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+          fi

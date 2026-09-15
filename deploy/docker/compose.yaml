@@ -1,0 +1,51 @@
+# God's Eye View — Unraid / docker compose deployment.
+# Docs: deploy/docker/README.md   Env reference: gev.env.example (copy to gev.env)
+name: gods-eye-view
+
+services:
+  gods-eye-view:
+    image: ghcr.io/cenz0h/gods-eye-view:latest
+    # To build locally instead (from the repo root):
+    # build:
+    #   context: ../..
+    #   dockerfile: deploy/docker/Dockerfile
+    container_name: gods-eye-view
+    restart: unless-stopped
+    init: true
+    stop_grace_period: 15s
+    env_file:
+      - ./gev.env                # API keys — never commit this file
+    environment:
+      TZ: Australia/Sydney
+      PUID: "99"                 # Unraid nobody:users. Use 1000:1000 elsewhere.
+      PGID: "100"
+      PORT: "4173"               # container port; HOST is fixed to 0.0.0.0 by the image
+      # Per-IP throttles for the cost-bearing proxies. Behind a reverse proxy every browser shares
+      # the proxy's IP, so these act as GLOBAL caps. Unset = unlimited.
+      GEV_RATELIMIT_OPENAI_PER_MIN: "30"
+      GEV_RATELIMIT_GOOGLE_PER_MIN: "60"
+      # GEV_FORCE_REBUILD: "1"   # rebuild dist on every start (debugging)
+      # GEV_BUILD_NODE_OPTIONS: "--max-old-space-size=3072"
+    ports:
+      - "4173:4173"              # LAN-visible: point your HTTPS proxy at http://<unraid-ip>:4173
+      # Alternative: publish nothing and join the proxy's network instead:
+      #   networks: [proxy]   (+ top-level `networks: proxy: external: true`)
+      #   then proxy to http://gods-eye-view:4173
+    volumes:
+      - /mnt/user/appdata/gods-eye-view/cache:/app/.gev-cache   # provider caches (terrain 30d TTL, TomTom daily budget counter)
+      - /mnt/user/appdata/gods-eye-view/logs:/app/.gev-logs     # voice debug log (.jsonl), only written when voice is used
+      - /mnt/user/appdata/gods-eye-view/dist:/app/dist          # built client bundle (~100 MB); safe to wipe, rebuilt on start
+    mem_limit: 3g                # vite build peaks ~1.5-2 GB; steady state ~300 MB
+    security_opt:
+      - no-new-privileges:true   # setpriv only DROPS privileges, so this is fine
+    # Healthcheck is defined in the image (start-period 15 min covers the first build).
+
+# Named-volume variant (replace the three bind mounts above):
+# volumes:
+#   - gev-cache:/app/.gev-cache
+#   - gev-logs:/app/.gev-logs
+#   - gev-dist:/app/dist
+# volumes:
+#   gev-cache: {}
+#   gev-logs: {}
+#   gev-dist: {}
