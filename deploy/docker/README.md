@@ -195,14 +195,35 @@ development mode and loopback callers only, so all keys must come from the envir
 
 ## Configuration
 
-Copy `gev.env.example` to `gev.env`. Upstream's `.env.example` at the repo root documents every
-variable in detail, including the CCTV feed toggles not listed here.
+There are two places a key can live, and they do not survive the same things.
 
-Environment variables always win over a `.env` file, so you can also mount a full
-`/app/.env:ro` if you prefer; its contents are included in the rebuild stamp.
+**In a file at `/config/gev.env` — recommended.** The container reads it at start. Because it sits
+in a mounted volume it is independent of the container's definition, so updating, recreating or
+reinstalling the container cannot touch it. On first start with an empty `/config` the container
+writes an annotated `gev.env` for you to fill in, owned by `PUID:PGID` with mode 600. One
+`KEY=value` per line; `#` comments and surrounding quotes are handled.
 
-`OPENSKY_CREDENTIALS_FILE` is not supported in the container; it is handled by a development shell
-script only. Use `OPENSKY_CLIENT_ID` and `OPENSKY_CLIENT_SECRET`.
+**In the container's environment** — the `environment:` block in compose, or the fields in the
+Unraid template. These win over the file when they are non-empty, which is what you want for a
+quick override. But they are stored in the container's definition: in Unraid that is the user
+template on the flash drive, and **re-applying or reinstalling the template resets every field to
+the template's defaults, which are blank for secrets.** If keys have ever vanished on you, this is
+why. Put them in `/config/gev.env` and it cannot happen again.
+
+Precedence is: a non-empty environment variable, then `/config/gev.env`, then nothing. A blank
+field counts as unset, so leaving a template field empty lets the file supply the value rather than
+shadowing it with an empty string. On start the log names which variables came from the file and
+which the environment overrode, without printing any values.
+
+Compose users can keep using `env_file: gev.env` next to `compose.yaml` instead; both work, and the
+`/config` mount is there so the two deployment styles behave the same.
+
+Upstream's `.env.example` at the repo root documents every variable in detail, including the CCTV
+feed toggles not listed here. `OPENSKY_CREDENTIALS_FILE` is not supported in the container; it is
+handled by a development shell script only. Use `OPENSKY_CLIENT_ID` and `OPENSKY_CLIENT_SECRET`.
+
+Changing `GOOGLE_MAPS_API_KEY` or `CESIUM_ION_TOKEN` in either place rebuilds the web bundle on the
+next start, because those two are compiled into it. Every other key takes effect on restart.
 
 ## Operations
 

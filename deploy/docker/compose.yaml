@@ -35,6 +35,10 @@ services:
       #   networks: [proxy]   (+ top-level `networks: proxy: external: true`)
       #   then proxy to http://gods-eye-view:4173
     volumes:
+      # API keys, read at start. Compose users can use env_file above instead; this exists so
+      # keys live somewhere the container definition cannot reset, and it is how the Unraid
+      # template supplies them. Anything set in `environment` or gev.env above wins over it.
+      - /mnt/user/appdata/gods-eye-view/config:/config
       - /mnt/user/appdata/gods-eye-view/cache:/app/.gev-cache   # provider caches (terrain 30d TTL, TomTom daily budget counter)
       - /mnt/user/appdata/gods-eye-view/logs:/app/.gev-logs     # voice debug log (.jsonl), only written when voice is used
       - /mnt/user/appdata/gods-eye-view/dist:/app/dist          # built client bundle (~100 MB); safe to wipe, rebuilt on start

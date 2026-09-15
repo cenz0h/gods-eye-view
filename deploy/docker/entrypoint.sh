@@ -21,6 +21,103 @@ die()  { printf '[gev] ERROR: %s\n' "$*" >&2; exit 1; }
 cd "$APP_DIR"
 [ -f "$VITE" ] || die "vite not found at $VITE (image is broken)"
 
+# ---------------------------------------------------------------- config file
+# Keys typed into a container manager's UI live in that manager's own config.
+# On Unraid they sit in the user template on the flash drive, and re-applying
+# or reinstalling the template resets every field to the template's defaults,
+# which are deliberately blank for secrets. Reading them from a file in a
+# mounted volume instead makes them independent of the container's definition:
+# recreating, updating or reinstalling the container cannot touch them.
+#
+# Precedence matches the app's own (server/standalone/vite.config.js): a real
+# environment variable wins, and the file fills the gaps. A variable that is
+# present but EMPTY counts as unset, because a container manager passes blank
+# fields through as empty strings and those must not shadow the file.
+GEV_ENV_FILE="${GEV_ENV_FILE:-/config/gev.env}"
+
+load_env_file() {
+  file="$1"
+  [ -f "$file" ] || return 0
+
+  # Strip CR first: these files get edited on Windows, and a trailing CR ends
+  # up inside the value, which breaks key comparisons in confusing ways.
+  # Read from a temp file rather than a pipe so exports survive (a pipe would
+  # run the loop in a subshell).
+  tmp="$(mktemp)"
+  tr -d '\r' < "$file" > "$tmp"
+
+  loaded=''
+  skipped=''
+  while IFS= read -r line || [ -n "$line" ]; do
+    case "$line" in '' | '#'*) continue ;; esac
+    line="${line#export }"
+    key="${line%%=*}"
+    [ "$key" = "$line" ] && continue
+    key="$(printf '%s' "$key" | tr -d '[:space:]')"
+    case "$key" in '' | *[!A-Za-z0-9_]*) continue ;; esac
+
+    value="${line#*=}"
+    case "$value" in
+      \"*\") value="${value#\"}"; value="${value%\"}" ;;
+      \'*\') value="${value#\'}"; value="${value%\'}" ;;
+    esac
+
+    eval "current=\${$key:-}"
+    if [ -n "${current:-}" ]; then
+      skipped="$skipped $key"
+    else
+      export "$key=$value"
+      loaded="$loaded $key"
+    fi
+  done < "$tmp"
+  rm -f "$tmp"
+
+  # Names only. Never log a value.
+  [ -z "$loaded" ] || log "config file set:$loaded"
+  [ -z "$skipped" ] || log "config file overridden by the environment:$skipped"
+}
+
+# Seed an annotated file the first time the volume is mounted, so there is
+# something obvious to edit rather than an empty directory.
+seed_env_file() {
+  dir="$(dirname "$GEV_ENV_FILE")"
+  [ -d "$dir" ] || return 0
+  [ -e "$GEV_ENV_FILE" ] && return 0
+  cat > "$GEV_ENV_FILE" <<'SEED' || return 0
+# God's Eye View configuration.
+#
+# Keys here survive container updates, recreation and template changes, which
+# values typed into a container manager's UI may not. One KEY=value per line.
+# Anything already set in the container's environment wins over this file.
+#
+# Changing either of the two client keys rebuilds the web bundle on the next
+# start (1-5 minutes). The rest take effect on restart.
+#
+# Full reference: https://github.com/cenz0h/gods-eye-view/blob/docker/.env.example
+# Billing warning before you set a Google key: deploy/docker/README.md
+
+# GOOGLE_MAPS_API_KEY=
+# CESIUM_ION_TOKEN=
+# OPENAI_API_KEY=
+# OPENSKY_CLIENT_ID=
+# OPENSKY_CLIENT_SECRET=
+# AISSTREAM_API_KEY=
+# TOMTOM_API_KEY=
+# FIRMS_MAP_KEY=
+SEED
+  # Owned by the runtime user so it stays editable over a share, and 0600
+  # because it is about to hold secrets. Only ever applied to a file this
+  # script just created — an existing one belongs to whoever set it up.
+  if [ "$(id -u)" = "0" ]; then
+    chown "$PUID:$PGID" "$GEV_ENV_FILE" 2>/dev/null || true
+  fi
+  chmod 600 "$GEV_ENV_FILE" 2>/dev/null || true
+  log "created $GEV_ENV_FILE — put your API keys there"
+}
+
+seed_env_file
+load_env_file "$GEV_ENV_FILE"
+
 # ---------------------------------------------------------------- privileges
 RUN_AS=""
 if [ "$(id -u)" = "0" ]; then
