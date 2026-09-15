@@ -46,6 +46,30 @@ RUN --mount=type=cache,target=/home/node/.npm,uid=1000,gid=1000,sharing=locked \
 #    must remain in the image (redistribution notices).
 USER root
 COPY --chown=node:node . .
+
+# 2b) Local fixes, carried as patches rather than commits. The docker branch
+#     keeps its source tree byte-identical to upstream so the daily sync merge
+#     stays automatic and conflict-free; the fixes live in deploy/patches and
+#     are applied here instead. Each is described in deploy/patches/README.md.
+#
+#     A patch that no longer applies fails the build on purpose. The smoke test
+#     never runs, no tag moves, and deployments keep pulling the last good image
+#     until the patch is refreshed against upstream.
+RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
+    apt-get update \
+ && apt-get install -y --no-install-recommends patch \
+ && rm -rf /var/lib/apt/lists/* \
+ && for p in deploy/patches/*.patch; do \
+      patch -p1 --batch --forward --dry-run --input="$p" >/dev/null \
+        || { echo "[patch] FAILED: $(basename "$p") no longer applies to this upstream revision"; exit 1; }; \
+    done \
+ && for p in deploy/patches/*.patch; do \
+      echo "[patch] applying $(basename "$p")"; \
+      patch -p1 --batch --forward --input="$p" \
+        || { echo "[patch] FAILED while applying $(basename "$p")"; exit 1; }; \
+    done \
+ && chown -R node:node /app/src /app/server
+
 COPY --chmod=755 deploy/docker/entrypoint.sh /usr/local/bin/gev-entrypoint
 
 # 3) Writable locations (volumes mount over the first three).

@@ -1,0 +1,373 @@
+diff --git a/server/providers/cctv.js b/server/providers/cctv.js
+index 5f60153..382835e 100644
+--- a/server/providers/cctv.js
++++ b/server/providers/cctv.js
+@@ -18,6 +18,11 @@ import {
+ } from './cctv/constants.js';
+ import { sanitizeCctvRangeHeader } from './cctv/range.js';
+ import { googleServerApiKey } from './places/google-key.js';
++import {
++  streetViewCacheKey,
++  readStreetViewCache,
++  writeStreetViewCache,
++} from './cctv/streetview-cache.js';
+ export { CCTV_FRAME_FETCH_TIMEOUT_MS, fetchCctvImageFromUpstream };
+ /**
+  * Vite plugin: CCTV camera proxy with source registry, frame/media serving,
+@@ -89,6 +94,17 @@ export function cctvProxy({ sourceRoot = process.cwd() } = {}) {
+     const streetViewKey = googleServerApiKey();
+     if (!streetViewKey || !Number.isFinite(lat) || !Number.isFinite(lon))
+       return null;
++
++    // A camera that is down stays down, and the client keeps asking for frames,
++    // so an uncached fallback bills Street View Static every refresh for as
++    // long as the outage lasts. The imagery for a fixed viewpoint does not
++    // change, so serve it from disk and only pay for the first miss.
++    const cacheKey = streetViewCacheKey({ lat, lon, heading, fov, pitch });
++    const cached = await readStreetViewCache(cacheKey);
++    if (cached) {
++      return { ok: true, body: cached.body, contentType: cached.contentType };
++    }
++
+     try {
+       const sv = new URL('https://maps.googleapis.com/maps/api/streetview');
+       sv.searchParams.set('size', '960x540');
+@@ -116,9 +132,13 @@ export function cctvProxy({ sourceRoot = process.cwd() } = {}) {
+       const svType = svResp.headers.get('content-type') || '';
+       if (!svResp.ok || !svType.startsWith('image/')) return null;
+ 
++      const svBody = Buffer.from(await svResp.arrayBuffer());
++      // Fire-and-forget: answering the frame must not wait on the disk write.
++      void writeStreetViewCache(cacheKey, svBody, svType);
++
+       return {
+         ok: true,
+-        body: Buffer.from(await svResp.arrayBuffer()),
++        body: svBody,
+         contentType: svType,
+       };
+     } catch {
+diff --git a/server/providers/cctv/streetview-cache.js b/server/providers/cctv/streetview-cache.js
+new file mode 100644
+index 0000000..1206aaa
+--- /dev/null
++++ b/server/providers/cctv/streetview-cache.js
+@@ -0,0 +1,120 @@
++import fsp from 'node:fs/promises';
++import path from 'node:path';
++import crypto from 'node:crypto';
++
++/**
++ * Disk cache for Google Street View static fallback frames.
++ *
++ * The CCTV frame route falls back to Street View whenever a camera's own feed
++ * is down, and the client re-requests frames on a refresh interval. Without a
++ * cache that bills a Street View Static request every few seconds for as long
++ * as the camera stays down, which is the failure mode most likely to run a
++ * self-hosted instance past Google's free allowance.
++ *
++ * Street View imagery for a fixed viewpoint is effectively static, so the
++ * entry is keyed by the rounded viewpoint and kept for a long TTL. Cached
++ * frames cost nothing, so only a miss reaches Google.
++ *
++ * Errors are swallowed: a cache problem must degrade to a live fetch, never
++ * break the frame route.
++ */
++
++const DEFAULT_TTL_MS = 7 * 24 * 60 * 60 * 1000;
++const MEM_MAX_ENTRIES = 64;
++
++/** @type {Map<string, {at:number, buf:Buffer, contentType:string}>} */
++const mem = new Map();
++
++function ttlMs() {
++  const raw = Number.parseInt(process.env.CCTV_STREETVIEW_CACHE_MS ?? '', 10);
++  return Number.isFinite(raw) && raw >= 0 ? raw : DEFAULT_TTL_MS;
++}
++
++function cacheDir() {
++  return path.join(process.cwd(), '.gev-cache', 'streetview');
++}
++
++/**
++ * Stable key for a viewpoint. Five decimal places is about a metre, far finer
++ * than Street View's own panorama spacing, so distinct cameras never collide
++ * while repeated requests for one camera always hit.
++ *
++ * @param {{lat:number, lon:number, heading:number, fov:number, pitch:number}} view
++ * @returns {string} Hex digest.
++ */
++export function streetViewCacheKey(view) {
++  const round = (n, dp) => (Number.isFinite(n) ? Number(n).toFixed(dp) : '0');
++  const raw = [
++    round(view.lat, 5),
++    round(view.lon, 5),
++    round(view.heading, 1),
++    round(view.fov, 1),
++    round(view.pitch, 1),
++  ].join(',');
++  return crypto.createHash('sha256').update(raw).digest('hex').slice(0, 32);
++}
++
++function memTrim() {
++  while (mem.size > MEM_MAX_ENTRIES) {
++    const oldest = mem.keys().next().value;
++    if (oldest === undefined) break;
++    mem.delete(oldest);
++  }
++}
++
++/**
++ * Look a viewpoint up. Returns null on a miss so the caller fetches upstream.
++ *
++ * @param {string} key - From `streetViewCacheKey`.
++ * @returns {Promise<{body:Buffer, contentType:string}|null>}
++ */
++export async function readStreetViewCache(key) {
++  const maxAge = ttlMs();
++  if (maxAge === 0) return null;
++
++  const hit = mem.get(key);
++  if (hit && Date.now() - hit.at < maxAge) {
++    return { body: hit.buf, contentType: hit.contentType };
++  }
++
++  try {
++    const base = path.join(cacheDir(), key);
++    const meta = JSON.parse(await fsp.readFile(`${base}.json`, 'utf8'));
++    if (!meta || !Number.isFinite(meta.at) || Date.now() - meta.at >= maxAge) {
++      return null;
++    }
++    const buf = await fsp.readFile(`${base}.img`);
++    const contentType =
++      typeof meta.contentType === 'string' ? meta.contentType : 'image/jpeg';
++    mem.set(key, { at: meta.at, buf, contentType });
++    memTrim();
++    return { body: buf, contentType };
++  } catch {
++    return null;
++  }
++}
++
++/**
++ * Store a fetched frame. Fire-and-forget: the caller should not await the
++ * write before answering the request.
++ *
++ * @param {string} key - From `streetViewCacheKey`.
++ * @param {Buffer} body - Image bytes.
++ * @param {string} contentType - Upstream content type.
++ * @returns {Promise<void>}
++ */
++export async function writeStreetViewCache(key, body, contentType) {
++  if (ttlMs() === 0) return;
++  const at = Date.now();
++  mem.set(key, { at, buf: body, contentType });
++  memTrim();
++  try {
++    const dir = cacheDir();
++    await fsp.mkdir(dir, { recursive: true });
++    const base = path.join(dir, key);
++    await fsp.writeFile(`${base}.img`, body);
++    await fsp.writeFile(`${base}.json`, JSON.stringify({ at, contentType }));
++  } catch (err) {
++    console.warn('[cctv-streetview] cache write failed:', err?.message || err);
++  }
++}
+diff --git a/server/providers/common/daily-budget.js b/server/providers/common/daily-budget.js
+new file mode 100644
+index 0000000..ca9049b
+--- /dev/null
++++ b/server/providers/common/daily-budget.js
+@@ -0,0 +1,106 @@
++import fsp from 'node:fs/promises';
++import path from 'node:path';
++import {
++  utcDayKey,
++  normalizeBudget,
++  isOverBudget,
++} from '../../../src/data/tomtomTiles.js';
++
++/**
++ * Persistent per-UTC-day request counter for a metered upstream.
++ *
++ * Generalises the TomTom tile budget in ../traffic.js so other paid providers
++ * can share it. A per-minute rate limit cannot bound a day's spend: it caps
++ * the burst, not the total. This does the opposite, and survives restarts
++ * because the counter lives under `.gev-cache` (a mounted volume in the
++ * container image).
++ *
++ * Never throws: a missing, unreadable or corrupt counter file resets to zero
++ * for today rather than taking the endpoint down, and a failed write is
++ * warned about and ignored. The cost of that trade is at most one day's
++ * over-count after a disk problem.
++ *
++ * @param {object} options
++ * @param {string} options.name - Subdirectory under `.gev-cache`.
++ * @param {string} options.envVar - Env var holding the daily limit.
++ * @param {number} options.defaultLimit - Limit when the env var is unset.
++ * @returns {{check:()=>Promise<{over:boolean,count:number,limit:number,date:string}>,
++ *            record:()=>void, snapshot:()=>Promise<object>}}
++ */
++export function createDailyBudget({ name, envVar, defaultLimit }) {
++  const dir = path.join(process.cwd(), '.gev-cache', name);
++  const file = path.join(dir, 'budget.json');
++
++  /** @type {{date:string, count:number}|null} */
++  let state = null;
++  let loaded = false;
++
++  /** Limit for today. A value of 0 or below means unlimited (isOverBudget's contract). */
++  function limit() {
++    const raw = Number.parseInt(process.env[envVar] ?? '', 10);
++    return Number.isFinite(raw) ? raw : defaultLimit;
++  }
++
++  async function loadOnce() {
++    if (loaded) return;
++    loaded = true;
++    try {
++      const parsed = JSON.parse(await fsp.readFile(file, 'utf8'));
++      if (
++        parsed &&
++        typeof parsed.date === 'string' &&
++        Number.isFinite(parsed.count)
++      ) {
++        state = parsed;
++      }
++    } catch {
++      /* no counter yet, or it is unreadable: today starts at zero */
++    }
++  }
++
++  async function persist() {
++    try {
++      await fsp.mkdir(dir, { recursive: true });
++      await fsp.writeFile(file, JSON.stringify(state), 'utf8');
++    } catch (err) {
++      console.warn(`[${name}-budget] write failed:`, err?.message || err);
++    }
++  }
++
++  /** Roll the counter onto today (UTC) and return it. */
++  function current() {
++    state = normalizeBudget(state, utcDayKey());
++    return state;
++  }
++
++  return {
++    /** Load once, roll the day, and report whether today's allowance is spent. */
++    async check() {
++      await loadOnce();
++      const today = current();
++      const max = limit();
++      return {
++        over: isOverBudget(today, max),
++        count: today.count,
++        limit: max,
++        date: today.date,
++      };
++    },
++
++    /**
++     * Count one upstream attempt. Attempts rather than successes, because the
++     * provider bills a request whether or not we like the response.
++     */
++    record() {
++      current().count += 1;
++      void persist();
++    },
++
++    /** Current state for a status endpoint. */
++    async snapshot() {
++      await loadOnce();
++      const today = current();
++      return { date: today.date, count: today.count, budget: limit() };
++    },
++  };
++}
+diff --git a/server/providers/places/google.js b/server/providers/places/google.js
+index 1ee83a8..9e3d550 100644
+--- a/server/providers/places/google.js
++++ b/server/providers/places/google.js
+@@ -3,6 +3,7 @@ import {
+   keylessGooglePlacesResponse,
+ } from './google-key.js';
+ import { makeOptInRateLimiter, clientKey } from '../common/rate-limit.js';
++import { createDailyBudget } from '../common/daily-budget.js';
+ import {
+   projectNearbyPlaces,
+   projectTextSearchPlaces,
+@@ -21,6 +22,42 @@ function googleRateLimiter() {
+   return _googleRateLimiter;
+ }
+ 
++/**
++ * Daily spend ceiling shared by both Places routes, which bill against the
++ * same Google SKU family. The per-minute limiter above caps a burst but not a
++ * day: the HUD asks for place context every 15 seconds, so an instance left
++ * open overnight can spend far past the free allowance without ever tripping
++ * it. Default 150/day keeps a month inside Places' 5,000 free requests.
++ * Set GEV_GOOGLE_PLACES_DAILY_BUDGET=0 to opt out.
++ */
++const placesBudget = createDailyBudget({
++  name: 'google',
++  envVar: 'GEV_GOOGLE_PLACES_DAILY_BUDGET',
++  defaultLimit: 150,
++});
++
++/**
++ * Answer an over-budget request. Keeps the `places: []` contract every error
++ * path on these routes owes the client.
++ *
++ * @param {import('node:http').ServerResponse} res - Response to finish.
++ * @param {{count:number, limit:number}} status - Budget state.
++ * @returns {void}
++ */
++function endOverBudget(res, status) {
++  res.statusCode = 429;
++  res.setHeader('Content-Type', 'application/json');
++  res.setHeader('Cache-Control', 'no-store');
++  res.setHeader('Retry-After', '3600');
++  res.end(
++    JSON.stringify({
++      error: 'Daily Google Places budget reached',
++      budget: { count: status.count, limit: status.limit },
++      places: [],
++    }),
++  );
++}
++
+ /** Validate raw lat/lon presence and WGS84 bounds before consuming request quota. */
+ export function validatePlacesCoordinates(searchParams) {
+   const rawLat = searchParams.get('lat');
+@@ -92,6 +129,15 @@ export function googlePlacesContextProxy({
+         return;
+       }
+ 
++      // Day-scale spend ceiling, checked after the free paths above so a
++      // keyless or malformed request never consumes budget.
++      const budgetStatus = await placesBudget.check();
++      if (budgetStatus.over) {
++        endOverBudget(res, budgetStatus);
++        return;
++      }
++      placesBudget.record();
++
+       const radiusM = Math.max(
+         25,
+         Math.min(5000, Number(requestUrl.searchParams.get('radiusM')) || 250),
+@@ -212,6 +258,14 @@ export function googlePlacesContextProxy({
+         return;
+       }
+ 
++      // Shares nearby-places' daily ceiling: same provider, same SKU family.
++      const budgetStatus = await placesBudget.check();
++      if (budgetStatus.over) {
++        endOverBudget(res, budgetStatus);
++        return;
++      }
++      placesBudget.record();
++
+       const radiusM = Math.max(
+         50,
+         Math.min(50000, Number(requestUrl.searchParams.get('radiusM')) || 4000),

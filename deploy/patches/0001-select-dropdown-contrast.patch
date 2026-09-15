@@ -1,0 +1,31 @@
+diff --git a/src/ui/styles/foundation.css b/src/ui/styles/foundation.css
+index 828eb99..953c3ef 100644
+--- a/src/ui/styles/foundation.css
++++ b/src/ui/styles/foundation.css
+@@ -4,6 +4,11 @@
+    ═══════════════════════════════════════════════ */
+ 
+ :root {
++  /* Native controls the page cannot paint — the popup a <select> opens, form
++     widgets, scrollbars — are drawn by the browser, which assumes a light page
++     unless told otherwise. Without this the option list renders as this theme's
++     near-white text on the browser's white popup. */
++  color-scheme: dark;
+   --bg-dark: #0a0a0f;
+   --glass-bg: rgba(12, 12, 20, 0.72);
+   --glass-border: rgba(255, 255, 255, 0.08);
+@@ -650,3 +655,14 @@ body:has(.data-toggle-row[data-layer-id='alpr-cameras'] .data-toggle-btn.active)
+   text-shadow: 0 0 20px var(--accent-glow);
+   transition: var(--transition-smooth);
+ }
++
++/* Belt and braces for the <select> popup. `color-scheme: dark` fixes this on
++   every current browser, but some platforms still paint option rows from the
++   element's own colours, and an option that inherits the panel's translucent
++   background lands on white. State both explicitly so the list is readable
++   wherever it is drawn. */
++select option,
++select optgroup {
++  background-color: #12121a;
++  color: var(--text-primary);
++}
