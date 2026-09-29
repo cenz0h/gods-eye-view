@@ -267,3 +267,71 @@ jobs:
             gh issue create -R "$GITHUB_REPOSITORY" --title "$title" --label "$ISSUE_LABEL" --body-file "$body"
           fi
           exit 1
+
+  # Lives here rather than in its own file: the drift guard only lets docker add two workflows.
+  token-expiry:
+    name: Check SYNC_TOKEN expiry
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    env:
+      SYNC_TOKEN: ${{ secrets.SYNC_TOKEN }}
+      LABEL: sync-token-expiry
+      WARN_DAYS: '14'
+    steps:
+      - name: Warn before SYNC_TOKEN expires
+        run: |
+          set -euo pipefail
+          if [ -z "$SYNC_TOKEN" ]; then
+            echo "SYNC_TOKEN not set; nothing to check"; exit 0
+          fi
+          # GitHub reports a PAT's expiry on every API response it authenticates.
+          hdr="$(curl -sS -o /dev/null -D - -w '%{http_code}\n' \
+                   -H "Authorization: Bearer $SYNC_TOKEN" -H 'Accept: application/vnd.github+json' \
+                   "https://api.github.com/repos/${GITHUB_REPOSITORY}")"
+          code="$(tail -n 1 <<< "$hdr")"
+          expiry="$(grep -i '^github-authentication-token-expiration:' <<< "$hdr" | cut -d' ' -f2- | tr -d '\r' || true)"
+
+          open_n="$(gh issue list -R "$GITHUB_REPOSITORY" --label "$LABEL" --state open --json number --jq '.[0].number // empty')"
+          regen="https://github.com/settings/personal-access-tokens"
+
+          if [ "$code" = "401" ]; then
+            days=-1; when="already expired or revoked"
+          elif [ -z "$expiry" ]; then
+            echo "SYNC_TOKEN has no expiry (HTTP $code)"
+            [ -z "$open_n" ] || gh issue close "$open_n" -R "$GITHUB_REPOSITORY" -c "SYNC_TOKEN no longer expires."
+            exit 0
+          else
+            days=$(( ( $(date -u -d "$expiry" +%s) - $(date -u +%s) ) / 86400 ))
+            when="expires $expiry (in ${days} days)"
+          fi
+          echo "SYNC_TOKEN $when"
+          echo "SYNC_TOKEN $when" >> "$GITHUB_STEP_SUMMARY"
+
+          if [ "$days" -gt "$WARN_DAYS" ]; then
+            [ -z "$open_n" ] || gh issue close "$open_n" -R "$GITHUB_REPOSITORY" -c "Renewed: SYNC_TOKEN now $when."
+            exit 0
+          fi
+
+          title="SYNC_TOKEN $when"
+          body="$RUNNER_TEMP/expiry.md"
+          {
+            echo "The \`SYNC_TOKEN\` secret used by the daily upstream sync $when."
+            echo "Once it expires the sync fails with a \"push rejected\" issue and the image stops updating."
+            echo
+            echo "Renew it:"
+            echo
+            echo "1. ${regen} → open the token → **Regenerate token** (keep repository access on this repo only, Contents + Workflows read/write)."
+            echo "2. \`gh secret set SYNC_TOKEN -R ${GITHUB_REPOSITORY}\` and paste the new value."
+            echo
+            echo "_Checked daily; this issue closes itself once the new token is in place._"
+          } > "$body"
+          gh label create "$LABEL" -R "$GITHUB_REPOSITORY" --color FBCA04 \
+            --description "SYNC_TOKEN PAT is about to expire" --force >/dev/null
+          if [ -z "$open_n" ]; then
+            gh issue create -R "$GITHUB_REPOSITORY" --title "$title" --label "$LABEL" --body-file "$body"
+          else
+            gh issue edit "$open_n" -R "$GITHUB_REPOSITORY" --title "$title" --body-file "$body"
+            case "$days" in 7|3|1|0) # re-notify at these points, not every day
+              gh issue comment "$open_n" -R "$GITHUB_REPOSITORY" --body "Reminder: SYNC_TOKEN $when." ;;
+            esac
+          fi

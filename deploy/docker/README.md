@@ -237,8 +237,9 @@ next start, because those two are compiled into it. Every other key takes effect
 - **`SYNC_TOKEN` secret (required):** the built-in `GITHUB_TOKEN` can never push changes to
   `.github/workflows/`, so the sync fails whenever upstream edits one of its workflows. Create a
   fine-grained PAT with repository access limited to this fork and **Contents** + **Workflows**
-  set to read/write, and save it as the `SYNC_TOKEN` Actions secret. Renew it before it expires; an
-  expired token surfaces as a `push rejected` sync issue.
+  set to read/write, and save it as the `SYNC_TOKEN` Actions secret. The daily sync also checks the
+  token's expiry and opens a `sync-token-expiry` issue 14 days out (reminders at 7, 3, 1 and 0
+  days); it closes itself once the secret holds a renewed token.
 
 ## Troubleshooting
 
