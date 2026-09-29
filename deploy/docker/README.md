@@ -230,9 +230,15 @@ next start, because those two are compiled into it. Every other key takes effect
 - **Update:** `docker compose pull && docker compose up -d`. The bundle rebuilds once on the next
   start because the image build id changed.
 - **Force a rebuild:** set `GEV_FORCE_REBUILD=1`, start, then remove it again.
-- **Upstream syncing** is automatic and daily. A merge conflict opens an issue labelled
-  `upstream-sync` on the fork; a broken build opens one labelled `image-build-failed` and leaves
-  `:latest` pointing at the last good image. Run `deploy/scripts/sync-upstream.sh` to sync by hand.
+- **Upstream syncing** is automatic and daily. A merge conflict or rejected push opens an issue
+  labelled `upstream-sync` on the fork; a broken build opens one labelled `image-build-failed` and
+  leaves `:latest` pointing at the last good image. Run `deploy/scripts/sync-upstream.sh` to sync by
+  hand.
+- **`SYNC_TOKEN` secret (required):** the built-in `GITHUB_TOKEN` can never push changes to
+  `.github/workflows/`, so the sync fails whenever upstream edits one of its workflows. Create a
+  fine-grained PAT with repository access limited to this fork and **Contents** + **Workflows**
+  set to read/write, and save it as the `SYNC_TOKEN` Actions secret. Renew it before it expires; an
+  expired token surfaces as a `push rejected` sync issue.
 
 ## Troubleshooting
 

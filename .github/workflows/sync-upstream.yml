@@ -2,9 +2,16 @@ name: Sync upstream
 
 # Lives on the `docker` branch (the fork's default branch). Never add this file to `main`.
 # 1) fast-forward fork main to upstream main   2) merge main into docker (merge, never rebase)
-# 3) on conflict/divergence/overlay drift: no push, open or update one issue, fail
+# 3) on conflict/divergence/overlay drift/rejected push: no push, open or update one issue, fail
 # 4) on a successful merge: dispatch docker-image.yml (workflow_dispatch is exempt from the
-#    "GITHUB_TOKEN events don't start workflows" rule, so no PAT is needed).
+#    "GITHUB_TOKEN events don't start workflows" rule).
+#
+# Git pushes use secrets.SYNC_TOKEN when set. GITHUB_TOKEN can never be granted the `workflows`
+# permission, so GitHub rejects any push carrying an upstream change under .github/workflows/.
+# SYNC_TOKEN: fine-grained PAT on this repo only, Contents + Workflows read/write. Without it the
+# sync still works until upstream touches a workflow file, then fails with an issue saying so.
+# PAT pushes do fire `push` workflows, so the merge commit carries [skip actions] and the image
+# build still comes from the explicit dispatch below (honouring trigger_build).
 
 on:
   schedule:
@@ -45,6 +52,7 @@ jobs:
           ref: docker
           fetch-depth: 0
           persist-credentials: true
+          token: ${{ secrets.SYNC_TOKEN || github.token }}
 
       - name: Configure git identity
         run: |
@@ -70,8 +78,15 @@ jobs:
             echo "main already at/after upstream $(git rev-parse --short "$UP")"
             echo "status=current" >> "$GITHUB_OUTPUT"
           elif git merge-base --is-ancestor "$MIR" "$UP"; then
-            git push origin "${UP}:refs/heads/${MIRROR_BRANCH}"
-            echo "status=updated" >> "$GITHUB_OUTPUT"
+            if git push origin "${UP}:refs/heads/${MIRROR_BRANCH}" 2> "$RUNNER_TEMP/push.err"; then
+              cat "$RUNNER_TEMP/push.err" >&2
+              echo "status=updated" >> "$GITHUB_OUTPUT"
+            else
+              cat "$RUNNER_TEMP/push.err" >&2
+              { echo 'error<<GEVEOF'; cat "$RUNNER_TEMP/push.err"; echo 'GEVEOF'; } >> "$GITHUB_OUTPUT"
+              echo "::error::push to ${MIRROR_BRANCH} was rejected; see the upstream-sync issue"
+              echo "status=pushfailed" >> "$GITHUB_OUTPUT"
+            fi
           else
             echo "::error::fork ${MIRROR_BRANCH} has commits that are not in upstream; refusing to touch it"
             echo "status=diverged" >> "$GITHUB_OUTPUT"
@@ -79,7 +94,7 @@ jobs:
 
       - name: Merge upstream into docker
         id: merge
-        if: steps.mirror.outputs.status != 'diverged'
+        if: steps.mirror.outputs.status == 'current' || steps.mirror.outputs.status == 'updated'
         run: |
           set -euo pipefail
           UP="upstream/${UPSTREAM_BRANCH}"
@@ -90,6 +105,7 @@ jobs:
           fi
           if git merge --no-ff --no-edit \
                -m "chore(sync): merge upstream ${UPSTREAM_BRANCH} @ $(git rev-parse --short "$UP") into ${WORK_BRANCH}" \
+               -m "[skip actions]" \
                "$UP"; then
             echo "status=merged" >> "$GITHUB_OUTPUT"
           else
@@ -116,14 +132,26 @@ jobs:
           fi
 
       - name: Push docker
+        id: push
         if: steps.merge.outputs.status == 'merged' && steps.drift.outputs.status == 'ok'
-        run: git push origin "HEAD:refs/heads/${WORK_BRANCH}"
+        run: |
+          set -euo pipefail
+          if git push origin "HEAD:refs/heads/${WORK_BRANCH}" 2> "$RUNNER_TEMP/push.err"; then
+            cat "$RUNNER_TEMP/push.err" >&2
+            echo "status=pushed" >> "$GITHUB_OUTPUT"
+          else
+            cat "$RUNNER_TEMP/push.err" >&2
+            { echo 'error<<GEVEOF'; cat "$RUNNER_TEMP/push.err"; echo 'GEVEOF'; } >> "$GITHUB_OUTPUT"
+            echo "::error::push to ${WORK_BRANCH} was rejected; see the upstream-sync issue"
+            echo "status=pushfailed" >> "$GITHUB_OUTPUT"
+          fi
 
       - name: Close a previously opened sync issue
         if: >
-          steps.mirror.outputs.status != 'diverged' &&
+          (steps.mirror.outputs.status == 'current' || steps.mirror.outputs.status == 'updated') &&
           steps.merge.outputs.status != 'conflict' &&
-          steps.drift.outputs.status != 'drift'
+          steps.drift.outputs.status != 'drift' &&
+          steps.push.outputs.status != 'pushfailed'
         run: |
           set -euo pipefail
           n="$(gh issue list -R "$GITHUB_REPOSITORY" --label "$ISSUE_LABEL" --state open --json number --jq '.[0].number // empty')"
@@ -134,7 +162,7 @@ jobs:
 
       - name: Dispatch image build
         if: >
-          steps.merge.outputs.status == 'merged' && steps.drift.outputs.status == 'ok' &&
+          steps.push.outputs.status == 'pushed' &&
           (github.event_name == 'schedule' || inputs.trigger_build)
         run: |
           gh workflow run docker-image.yml -R "$GITHUB_REPOSITORY" --ref "$WORK_BRANCH" \
@@ -142,13 +170,19 @@ jobs:
 
       - name: Open or update the sync issue and fail
         if: >
+          failure() ||
           steps.mirror.outputs.status == 'diverged' ||
+          steps.mirror.outputs.status == 'pushfailed' ||
           steps.merge.outputs.status == 'conflict' ||
-          steps.drift.outputs.status == 'drift'
+          steps.drift.outputs.status == 'drift' ||
+          steps.push.outputs.status == 'pushfailed'
         env:
           MIRROR_STATUS: ${{ steps.mirror.outputs.status }}
           MERGE_STATUS: ${{ steps.merge.outputs.status }}
           DRIFT_STATUS: ${{ steps.drift.outputs.status }}
+          PUSH_STATUS: ${{ steps.push.outputs.status }}
+          PUSH_ERROR: ${{ steps.mirror.outputs.error || steps.push.outputs.error }}
+          HAS_SYNC_TOKEN: ${{ secrets.SYNC_TOKEN != '' }}
           CONFLICTS: ${{ steps.merge.outputs.conflicts }}
           DRIFT_FILES: ${{ steps.drift.outputs.files }}
           UP_SHORT: ${{ steps.upstream.outputs.short }}
@@ -158,7 +192,7 @@ jobs:
           set -euo pipefail
           body="$RUNNER_TEMP/issue.md"
           {
-            echo "Automated upstream sync **failed** on $(date -u +%Y-%m-%dT%H:%MZ). Nothing was pushed."
+            echo "Automated upstream sync **failed** on $(date -u +%Y-%m-%dT%H:%MZ). \`docker\` was not updated."
             echo
             echo "- Upstream: https://github.com/${UPSTREAM_REPO}/commit/${UP_SHA} (\`${UP_SHORT}\`)"
             echo "- Run: ${RUN_URL}"
@@ -172,6 +206,25 @@ jobs:
               echo 'git fetch upstream && git fetch origin'
               echo 'git push --force-with-lease=main origin upstream/main:main'
               echo '```'
+            elif [ "$MIRROR_STATUS" = "pushfailed" ] || [ "$PUSH_STATUS" = "pushfailed" ]; then
+              echo "## GitHub rejected the push"
+              echo
+              echo '```'; echo "$PUSH_ERROR"; echo '```'; echo
+              if [ "$PUSH_STATUS" = "pushfailed" ]; then
+                echo "\`main\` may already have been updated; \`docker\` was not."
+                echo
+              fi
+              if grep -q 'without `workflows` permission' <<< "$PUSH_ERROR"; then
+                echo "Upstream changed a file under \`.github/workflows/\`, and the token this job pushes with may not touch workflow files."
+                echo
+                if [ "$HAS_SYNC_TOKEN" = "true" ]; then
+                  echo "The \`SYNC_TOKEN\` secret is set but lacks **Workflows: Read and write** (or has expired). Regenerate it with Contents + Workflows read/write on this repo and update the secret."
+                else
+                  echo "Fix once: create a fine-grained PAT (repository access: this repo only; permissions: **Contents** and **Workflows** read/write), then save it as the \`SYNC_TOKEN\` Actions secret and re-run this workflow."
+                fi
+                echo
+                echo "To unblock immediately without a token, run \`deploy/scripts/sync-upstream.sh\` locally; it pushes with your own credentials."
+              fi
             elif [ "$MERGE_STATUS" = "conflict" ]; then
               echo "## Merge conflict merging upstream into \`docker\`"
               echo
@@ -187,17 +240,25 @@ jobs:
               echo '```'
               echo
               echo "If upstream added its own root-level Docker files this is expected; ours stay under \`deploy/\`."
-            else
+            elif [ "$DRIFT_STATUS" = "drift" ]; then
               echo "## Overlay drift: \`docker\` modifies upstream-owned files"
               echo
               echo "Only \`deploy/**\`, \`.github/workflows/sync-upstream.yml\` and \`.github/workflows/docker-image.yml\` may differ from upstream. Offending paths:"
               echo; echo '```'; echo "$DRIFT_FILES"; echo '```'; echo
               echo "Fix on \`docker\`: \`git checkout upstream/main -- <path>\` (restores upstream's version), commit, push."
+            else
+              echo "## A step failed unexpectedly"
+              echo
+              echo "See the run log for the failing step."
             fi
             echo
             echo "_This issue is updated by each failing run and auto-closed by the next successful one._"
           } > "$body"
-          title="Upstream sync failed: ${MERGE_STATUS:-$MIRROR_STATUS}${DRIFT_STATUS:+/$DRIFT_STATUS} at upstream ${UP_SHORT}"
+          reason="${MERGE_STATUS:-$MIRROR_STATUS}${DRIFT_STATUS:+/$DRIFT_STATUS}"
+          if [ "$MIRROR_STATUS" = "pushfailed" ] || [ "$PUSH_STATUS" = "pushfailed" ]; then
+            reason="push rejected"
+          fi
+          title="Upstream sync failed: ${reason:-error} at upstream ${UP_SHORT}"
           n="$(gh issue list -R "$GITHUB_REPOSITORY" --label "$ISSUE_LABEL" --state open --json number --jq '.[0].number // empty')"
           if [ -n "$n" ]; then
             gh issue edit "$n" -R "$GITHUB_REPOSITORY" --title "$title" --body-file "$body"
