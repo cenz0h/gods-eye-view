@@ -1,12 +1,8 @@
 import { createLocalGeoJsonLayer } from './localGeojsonCore.js';
+import { INFRASTRUCTURE_DATA_URLS } from '../sources/infrastructureData.js';
 
-// Resolved by Vite in builds and relative to this module in other consumers.
-const datacentersUrl = new URL(
-  './local_data/datacenters/datacenters.geojsonl',
-  import.meta.url,
-).href;
-const damsUrl = new URL('./local_data/dams/dams.geojsonl', import.meta.url)
-  .href;
+const datacentersUrl = INFRASTRUCTURE_DATA_URLS['local-datacenters'];
+const damsUrl = INFRASTRUCTURE_DATA_URLS['local-dams'];
 
 /**
  * Create fresh datacenter and dam layers without starting or loading them.
