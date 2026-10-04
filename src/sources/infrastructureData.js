@@ -3,16 +3,19 @@
  * data files, line-delimited GeoJSON parsing and analyst records.
  */
 
-// Resolved by Vite in builds and relative to this module in other consumers.
+// Resolved by Vite in builds and relative to this module in other consumers,
+// when read, so importing this module never needs a module URL.
 export const INFRASTRUCTURE_DATA_URLS = Object.freeze({
-  'local-datacenters': new URL(
-    '../data/local_data/datacenters/datacenters.geojsonl',
-    import.meta.url,
-  ).href,
-  'local-dams': new URL(
-    '../data/local_data/dams/dams.geojsonl',
-    import.meta.url,
-  ).href,
+  get 'local-datacenters'() {
+    return new URL(
+      '../data/local_data/datacenters/datacenters.geojsonl',
+      import.meta.url,
+    ).href;
+  },
+  get 'local-dams'() {
+    return new URL('../data/local_data/dams/dams.geojsonl', import.meta.url)
+      .href;
+  },
 });
 
 /** Parse GeoJSON Lines: one Feature per non-empty line. */
