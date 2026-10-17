@@ -331,6 +331,30 @@ const RAW_GBFS_CITY_REGISTRY = [
     provider: 'Bike Itaú',
   },
   {
+    id: 'bogota-tembici',
+    city: 'Bogotá, Colombia',
+    centerLat: 4.6533,
+    centerLon: -74.0836,
+    loadRadiusKm: 90,
+    stationInformationUrl:
+      'https://bogota.publicbikesystem.net/customer/gbfs/v2/en/station_information.json',
+    stationStatusUrl:
+      'https://bogota.publicbikesystem.net/customer/gbfs/v2/en/station_status.json',
+    provider: 'Tembici Bogotá',
+  },
+  {
+    id: 'santiago-bike-itau',
+    city: 'Santiago, Chile',
+    centerLat: -33.4372,
+    centerLon: -70.6506,
+    loadRadiusKm: 90,
+    stationInformationUrl:
+      'https://santiago.publicbikesystem.net/customer/gbfs/v2/en/station_information.json',
+    stationStatusUrl:
+      'https://santiago.publicbikesystem.net/customer/gbfs/v2/en/station_status.json',
+    provider: 'Bike Itaú Santiago',
+  },
+  {
     id: 'toronto-bike-share',
     city: 'Toronto, ON',
     centerLat: 43.6532,
@@ -553,6 +577,32 @@ const RAW_GBFS_CITY_REGISTRY = [
     stationStatusUrl:
       'https://api.cyclocity.fr/contracts/lillestrom/gbfs/station_status.json',
     provider: 'Bysykkel Lillestrøm',
+  },
+  {
+    id: 'barcelona-bicing',
+    city: 'Barcelona, Spain',
+    centerLat: 41.3926,
+    centerLon: 2.164,
+    loadRadiusKm: 40,
+    stationInformationUrl:
+      'https://barcelona.publicbikesystem.net/customer/gbfs/v2/en/station_information.json',
+    stationStatusUrl:
+      'https://barcelona.publicbikesystem.net/customer/gbfs/v2/en/station_status.json',
+    provider: 'Bicing',
+  },
+  // AMBici covers the metropolitan municipalities around Barcelona, from
+  // Castelldefels to Badalona, and overlaps Bicing only at the city edge.
+  {
+    id: 'barcelona-ambici',
+    city: 'Barcelona metropolitan area, Spain',
+    centerLat: 41.37,
+    centerLon: 2.07,
+    loadRadiusKm: 40,
+    stationInformationUrl:
+      'https://gbfs.nextbike.net/maps/gbfs/v2/nextbike_bs/en/station_information.json',
+    stationStatusUrl:
+      'https://gbfs.nextbike.net/maps/gbfs/v2/nextbike_bs/en/station_status.json',
+    provider: 'AMBici',
   },
 ];
 function normalizeRegistryEntry(entry) {
