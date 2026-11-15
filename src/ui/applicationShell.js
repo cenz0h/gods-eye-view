@@ -65,6 +65,7 @@ import { useHudStore } from './stores/hud.js';
 import { useDisplayStore } from './stores/display.js';
 import { useLocaleStore } from './stores/locale.js';
 import { useLocationStore } from './stores/location.js';
+import { installRailEdgeScroll } from './railEdgeScroll.js';
 import { useCockpitStore } from './stores/cockpit.js';
 import { useGlobeActionsStore } from './stores/globeActions.js';
 import { useRecordingStore } from './stores/recording.js';
@@ -164,6 +165,8 @@ export class StyleManager extends ShellFacade {
     });
     // Vue views share this runtime and its stores; dispose unmounts them.
     this._ui = createUiRuntime({ pinia: applicationPinia() });
+    // Scrolling at a screen edge steps through that side's rail panels.
+    this._removeRailEdgeScroll = installRailEdgeScroll();
     this._feedback = new ShellFeedback({
       readLayers: () => withPlacePacks(this._dataManager?.getAll?.() || []),
     });
@@ -223,6 +226,7 @@ export class StyleManager extends ShellFacade {
         getDetectionTuning: services.getDetectionTuning,
         getKeyholeFadeTuning: services.getKeyholeFadeTuning,
         getScopeMaskFeather: services.getScopeMaskFeather,
+        getScopeMaskOpacity: services.getScopeMaskOpacity,
         getScopeTerminusOverride: services.getScopeTerminusOverride,
         governorRequestRender: services.governorRequestRender,
         holdContinuousRender: services.holdContinuousRender,
@@ -236,6 +240,7 @@ export class StyleManager extends ShellFacade {
         setKeyholeFadeTuning: services.setKeyholeFadeTuning,
         setScopeMaskEnabled: services.setScopeMaskEnabled,
         setScopeMaskFeather: services.setScopeMaskFeather,
+        setScopeMaskOpacity: services.setScopeMaskOpacity,
       },
       elements: {
         _ppToggles: this._ppToggles,
@@ -591,6 +596,10 @@ export class StyleManager extends ShellFacade {
           this._setDetectionAllocation(...args),
         _setDetectionFade: (...args) => this._setDetectionFade(...args),
         _setScope: (...args) => this._visualSettings._setScope(...args),
+        _applyGlobalPostDefaults: (...args) =>
+          this._applyGlobalPostDefaults(...args),
+        _adoptDetectionAsRestore: () =>
+          this._visualSettings.adoptDetectionAsRestore(),
         setCelestialRingEnabled: (...args) =>
           this.setCelestialRingEnabled(...args),
         _setModels3dEnabled: (...args) => this._setModels3dEnabled(...args),
@@ -1856,6 +1865,7 @@ export class StyleManager extends ShellFacade {
     const { destroyTrackedReadout, destroyWorldOverlay, destroyDetection } =
       this.services;
     if (this._disposed) return;
+    this._removeRailEdgeScroll?.();
     this._shareRestoration.destroy();
     this._feedback.clearLoadingStatus();
     this._disposed = true;
